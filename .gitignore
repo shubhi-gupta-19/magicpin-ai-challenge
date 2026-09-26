@@ -45,3 +45,4 @@ htmlcov/
 .vscode/
 .idea/
 *.swp
+data/pushed_contexts.json

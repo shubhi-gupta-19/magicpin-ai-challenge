@@ -16,6 +16,7 @@ import json
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Tuple, Optional
 
@@ -33,6 +34,10 @@ def print_banner(text: str):
     print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*80}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.CYAN}{text.center(80)}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.CYAN}{'='*80}{Colors.RESET}\n")
+
+def safe_str(val: Any) -> str:
+    s = str(val if val is not None else "")
+    return s.encode("ascii", errors="replace").decode("ascii")
 
 def http_request(method: str, url: str, body: Optional[dict] = None, timeout: int = 25) -> Tuple[int, dict, float]:
     """Execute HTTP request, returns (status_code, response_json_or_text, elapsed_ms)."""
@@ -110,23 +115,90 @@ def run_smoke_test(base_url: str) -> bool:
     print(f"    {'PASS' if passed else 'FAIL'} [{status}] ({lat:.0f}ms) — {details}")
 
     # --------------------------------------------------------------------------
-    # 3. POST /v1/context (Fresh Push & Stale Version Rejection)
+    # 3. POST /v1/context (Full Context Setup: Category, Merchant, Customer, Trigger)
     # --------------------------------------------------------------------------
     print(f"[*] Testing POST /v1/context (versioned storage & rejection) ...")
-    fresh_ver = int(time.time()) % 100000 + 20000
+    ts = int(time.time())
+    fresh_ver = int(time.time() * 1000)
     cat_payload = load_official_category_payload()
-    push_body = {
+
+    # 3A: Push Category
+    push_cat = {
         "scope": "category",
         "context_id": "dentists",
         "version": fresh_ver,
         "payload": cat_payload
     }
-    status, data, lat = http_request("POST", f"{base_url}/v1/context", push_body)
-    passed_push = (status == 200 and data.get("accepted") is True and "ack_id" in data)
-    results.append(TestResult("POST /v1/context (fresh version)", passed_push, status, lat, f"accepted={data.get('accepted')}, ack={data.get('ack_id')}"))
-    print(f"    {'PASS' if passed_push else 'FAIL'} Fresh Push [{status}] ({lat:.0f}ms) — ack={data.get('ack_id')}")
+    status, data, lat = http_request("POST", f"{base_url}/v1/context", push_cat)
+    passed_cat = (status == 200 and data.get("accepted") is True and "ack_id" in data)
+    results.append(TestResult("POST /v1/context (category)", passed_cat, status, lat, f"accepted={data.get('accepted')}, ack={data.get('ack_id')}"))
+    print(f"    {'PASS' if passed_cat else 'FAIL'} Category Push [{status}] ({lat:.0f}ms) — ack={data.get('ack_id')}")
 
-    # Stale version rejection test
+    # 3B: Push Merchant
+    push_merch = {
+        "scope": "merchant",
+        "context_id": "m_001_drmeera_dentist_delhi",
+        "version": fresh_ver,
+        "payload": {
+            "merchant_id": "m_001_drmeera_dentist_delhi",
+            "category_slug": "dentists",
+            "identity": {
+                "name": "Dr. Meera Dental Clinic",
+                "owner_first_name": "Meera",
+                "locality": "Malviya Nagar"
+            }
+        }
+    }
+    status_m, data_m, lat_m = http_request("POST", f"{base_url}/v1/context", push_merch)
+    passed_m = (status_m == 200 and data_m.get("accepted") is True)
+    results.append(TestResult("POST /v1/context (merchant)", passed_m, status_m, lat_m, f"accepted={data_m.get('accepted')}, ack={data_m.get('ack_id')}"))
+    print(f"    {'PASS' if passed_m else 'FAIL'} Merchant Push [{status_m}] ({lat_m:.0f}ms) — ack={data_m.get('ack_id')}")
+
+    # 3C: Push Customer
+    push_cust = {
+        "scope": "customer",
+        "context_id": "c_001_priya_for_m001",
+        "version": fresh_ver,
+        "payload": {
+            "customer_id": "c_001_priya_for_m001",
+            "merchant_id": "m_001_drmeera_dentist_delhi",
+            "identity": {"name": "Priya Sharma"},
+            "relationship": {"visit_count": 3}
+        }
+    }
+    status_c, data_c, lat_c = http_request("POST", f"{base_url}/v1/context", push_cust)
+    passed_c = (status_c == 200 and data_c.get("accepted") is True)
+    results.append(TestResult("POST /v1/context (customer)", passed_c, status_c, lat_c, f"accepted={data_c.get('accepted')}, ack={data_c.get('ack_id')}"))
+    print(f"    {'PASS' if passed_c else 'FAIL'} Customer Push [{status_c}] ({lat_c:.0f}ms) — ack={data_c.get('ack_id')}")
+
+    # 3D: Push Trigger with fresh, non-colliding execution identifier
+    live_trg_id = f"trg_live_recall_{ts}"
+    live_supp_key = f"recall_due:priya:live_{ts}"
+    push_trg = {
+        "scope": "trigger",
+        "context_id": live_trg_id,
+        "version": fresh_ver,
+        "payload": {
+            "id": live_trg_id,
+            "scope": "customer",
+            "kind": "recall_due",
+            "merchant_id": "m_001_drmeera_dentist_delhi",
+            "customer_id": "c_001_priya_for_m001",
+            "payload": {
+                "service_due": "6_month_cleaning",
+                "last_service_date": "2026-05-12",
+                "due_date": "2026-11-12"
+            },
+            "urgency": 3,
+            "suppression_key": live_supp_key
+        }
+    }
+    status_t, data_t, lat_t = http_request("POST", f"{base_url}/v1/context", push_trg)
+    passed_t = (status_t == 200 and data_t.get("accepted") is True)
+    results.append(TestResult("POST /v1/context (trigger)", passed_t, status_t, lat_t, f"accepted={data_t.get('accepted')}, ack={data_t.get('ack_id')}"))
+    print(f"    {'PASS' if passed_t else 'FAIL'} Trigger Push [{status_t}] ({lat_t:.0f}ms) — ack={data_t.get('ack_id')}")
+
+    # 3E: Stale version rejection test
     stale_body = {
         "scope": "category",
         "context_id": "dentists",
@@ -141,20 +213,11 @@ def run_smoke_test(base_url: str) -> bool:
     # --------------------------------------------------------------------------
     # 4. POST /v1/tick (Proactive triggers & Automatic ID capture)
     # --------------------------------------------------------------------------
-    print(f"[*] Testing POST /v1/tick (proactive trigger dispatch) ...")
-    # Provide diverse canonical candidate triggers across distinct merchants
-    unique_now = f"2026-11-{int(time.time()) % 20 + 10:02d}T10:00:00Z"
-    candidate_triggers = [
-        "trg_077_appointment_tomorrow_m_020_renu_salon_luc",
-        "trg_004_perf_dip_bharat",
-        "trg_019_chronic_refill_grandfather",
-        "trg_078_appointment_tomorrow_m_006_southindiancaf",
-        "trg_008_perf_dip_pizzajunction",
-        "trg_015_winback_rashmi"
-    ]
+    print(f"\n[*] Testing POST /v1/tick (proactive trigger dispatch) ...")
+    now_iso = datetime.now(timezone.utc).isoformat()
     tick_body = {
-        "now": unique_now,
-        "available_triggers": candidate_triggers
+        "now": now_iso,
+        "available_triggers": [live_trg_id]
     }
     status, data, lat = http_request("POST", f"{base_url}/v1/tick", tick_body)
     actions = data.get("actions", [])
@@ -162,20 +225,22 @@ def run_smoke_test(base_url: str) -> bool:
     results.append(TestResult("POST /v1/tick", passed_tick, status, lat, f"actions_count={len(actions)}"))
     print(f"    {'PASS' if passed_tick else 'FAIL'} [{status}] ({lat:.0f}ms) — Generated {len(actions)} action(s)")
 
-    # Automatically extract IDs from tick output without guessing
-    cust_action = next((a for a in actions if a.get("customer_id")), None)
-    merch_action = next((a for a in actions if not a.get("customer_id")), None)
+    # Capture IDs directly from returned action
+    if actions:
+        action = actions[0]
+        conv_cust = action["conversation_id"]
+        mid_cust = action["merchant_id"]
+        cid_cust = action["customer_id"]
+        print(f"    Captured Action IDs: conv={conv_cust}, merchant={mid_cust}, customer={cid_cust}")
+        safe_body_snip = safe_str(action.get('body', ''))[:80]
+        print(f"    Action Body: \"{safe_body_snip}...\"")
+    else:
+        conv_cust = f"conv_m_001_{live_trg_id}"
+        mid_cust = "m_001_drmeera_dentist_delhi"
+        cid_cust = "c_001_priya_for_m001"
 
-    # Fallback to defaults only if specific role was filtered
-    conv_cust = cust_action["conversation_id"] if cust_action else "conv_m_020_renu_salon_lucknow_live_smoke"
-    mid_cust = cust_action["merchant_id"] if cust_action else "m_020_renu_salon_lucknow"
-    cid_cust = cust_action["customer_id"] if cust_action else "c_080_riya_for_m_020_renu_salon_lucknow"
-
-    conv_merch = merch_action["conversation_id"] if merch_action else f"conv_m_002_live_smoke_{int(time.time())}"
-    mid_merch = merch_action["merchant_id"] if merch_action else "m_002_bharat_dentist_mumbai"
-
-    print(f"    Captured Customer IDs: conv={conv_cust}, merchant={mid_cust}, customer={cid_cust}")
-    print(f"    Captured Merchant IDs: conv={conv_merch}, merchant={mid_merch}")
+    mid_merch = mid_cust
+    conv_merch = f"conv_merch_smoke_{ts}"
 
     # --------------------------------------------------------------------------
     # 5. POST /v1/reply — Customer Flow (Interest, Slot Selection, Cancellation)
@@ -197,16 +262,16 @@ def run_smoke_test(base_url: str) -> bool:
     # Assertions:
     # 1. Action must be "send"
     # 2. CTA must be slot/package selection
-    # 3. Must be relevant to merchant/category (not generic fallback)
+    # 3. Must be relevant to Dr. Meera / dental / checkup / cleaning
     # 4. Must NOT falsely claim an appointment is already booked/scheduled
     no_premature_claim = ("is confirmed" not in reply_body and "i have scheduled" not in reply_body)
-    relevant = any(k in reply_body for k in ["renu", "salon", "styling", "dental", "clinic", "checkup", "cleaning", "pharmacy", "refill", "₹", "package", "details"])
+    relevant = any(k in reply_body for k in ["meera", "dental", "clinic", "checkup", "cleaning", "₹", "package", "details"])
     passed_c1 = (status == 200 and data.get("action") == "send" and data.get("cta") == "multi_choice_slot" and no_premature_claim and relevant)
     
     details_c1 = f"action={data.get('action')}, cta={data.get('cta')}, relevant={relevant}, no_premature_claim={no_premature_claim}"
     results.append(TestResult("POST /v1/reply (Customer: Interest)", passed_c1, status, lat, details_c1))
     print(f"    {'PASS' if passed_c1 else 'FAIL'} Customer Interest [{status}] ({lat:.0f}ms) — {details_c1}")
-    print(f"         Snippet: \"{data.get('body', '')[:85]}...\"")
+    print(f"         Snippet: \"{safe_str(data.get('body', ''))[:85]}...\"")
 
     # 5B: Customer slot selection ("1, Wednesday 6pm works for me")
     c_turn2_body = {
@@ -224,11 +289,11 @@ def run_smoke_test(base_url: str) -> bool:
     details_c2 = f"action={data.get('action')}, cta={data.get('cta')}, booking_confirmed={confirmed}"
     results.append(TestResult("POST /v1/reply (Customer: Slot Confirm)", passed_c2, status, lat, details_c2))
     print(f"    {'PASS' if passed_c2 else 'FAIL'} Customer Slot Confirm [{status}] ({lat:.0f}ms) — {details_c2}")
-    print(f"         Snippet: \"{data.get('body', '')[:85]}...\"")
+    print(f"         Snippet: \"{safe_str(data.get('body', ''))[:85]}...\"")
 
     # 5C: Customer decline / cancel ("Cancel my booking for now, thank you.")
     c_turn3_body = {
-        "conversation_id": f"conv_cust_cancel_{int(time.time())}",
+        "conversation_id": f"conv_cust_cancel_{ts}",
         "merchant_id": mid_cust,
         "customer_id": cid_cust,
         "from_role": "customer",
@@ -268,10 +333,10 @@ def run_smoke_test(base_url: str) -> bool:
     details_m1 = f"action={data.get('action')}, actioning={has_actioning}, qualifying={has_qualifying}, no_premature_claim={no_premature_publish}"
     results.append(TestResult("POST /v1/reply (Merchant: Commitment)", passed_m1, status, lat, details_m1))
     print(f"    {'PASS' if passed_m1 else 'FAIL'} Merchant Commitment [{status}] ({lat:.0f}ms) — {details_m1}")
-    print(f"         Snippet: \"{data.get('body', '')[:85]}...\"")
+    print(f"         Snippet: \"{safe_str(data.get('body', ''))[:85]}...\"")
 
     # 6B: Merchant Modification ("Can we change discount to 15% instead?")
-    m_mod_conv = f"conv_m_mod_{int(time.time())}"
+    m_mod_conv = f"conv_m_mod_{ts}"
     m_turn2_body = {
         "conversation_id": m_mod_conv,
         "merchant_id": mid_merch,
@@ -289,7 +354,7 @@ def run_smoke_test(base_url: str) -> bool:
     details_m2 = f"action={data.get('action')}, reflects_15%={reflects_discount}, requests_confirm={requests_confirm}"
     results.append(TestResult("POST /v1/reply (Merchant: Modification)", passed_m2, status, lat, details_m2))
     print(f"    {'PASS' if passed_m2 else 'FAIL'} Merchant Modification [{status}] ({lat:.0f}ms) — {details_m2}")
-    print(f"         Snippet: \"{data.get('body', '')[:85]}...\"")
+    print(f"         Snippet: \"{safe_str(data.get('body', ''))[:85]}...\"")
 
     # 6C: Merchant Final Confirmation ("Looks good, publish it")
     m_turn3_body = {
@@ -306,11 +371,11 @@ def run_smoke_test(base_url: str) -> bool:
     details_m3 = f"action={data.get('action')}, cta={data.get('cta')}, scheduled={scheduled}"
     results.append(TestResult("POST /v1/reply (Merchant: Final Confirm)", passed_m3, status, lat, details_m3))
     print(f"    {'PASS' if passed_m3 else 'FAIL'} Merchant Final Confirm [{status}] ({lat:.0f}ms) — {details_m3}")
-    print(f"         Snippet: \"{data.get('body', '')[:85]}...\"")
+    print(f"         Snippet: \"{safe_str(data.get('body', ''))[:85]}...\"")
 
     # 6D: Merchant Rejection ("Don't post, cancel this draft")
     m_turn4_body = {
-        "conversation_id": f"conv_m_rej_{int(time.time())}",
+        "conversation_id": f"conv_m_rej_{ts}",
         "merchant_id": mid_merch,
         "from_role": "merchant",
         "message": "Don't post, cancel this draft",
@@ -338,7 +403,7 @@ def run_smoke_test(base_url: str) -> bool:
 
     print(f"\n{Colors.BOLD}TOTAL TESTS: {len(results)} | PASSED: {sum(1 for r in results if r.passed)} | FAILED: {sum(1 for r in results if not r.passed)}{Colors.RESET}")
     if all_passed:
-        print(f"\n{Colors.GREEN}{Colors.BOLD}>>> ALL 12/12 LIVE API SMOKE TESTS PASSED PERFECTLY ON RENDER! <<<{Colors.RESET}\n")
+        print(f"\n{Colors.GREEN}{Colors.BOLD}>>> ALL {len(results)}/{len(results)} LIVE API SMOKE TESTS PASSED PERFECTLY ON RENDER! <<<{Colors.RESET}\n")
     else:
         print(f"\n{Colors.RED}{Colors.BOLD}>>> SOME SMOKE TESTS FAILED. INSPECT LOGS ABOVE. <<<{Colors.RESET}\n")
 

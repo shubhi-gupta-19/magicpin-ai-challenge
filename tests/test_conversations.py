@@ -58,6 +58,100 @@ def test_tick_with_explicit_empty_triggers(client: TestClient):
     assert resp.status_code == 200
     assert resp.json().get("actions") == []
 
+def test_tick_with_full_context_lifecycle(client: TestClient):
+    """
+    Reproduces the live context push and tick scenario:
+    1. Push category, merchant, customer, and trigger via /v1/context.
+    2. Verify healthz reports loaded contexts.
+    3. Call /v1/tick and verify proactive action generation with matching IDs.
+    4. Verify deduplication suppression on subsequent tick call.
+    """
+    # 1. Push category
+    r_cat = client.post("/v1/context", json={
+        "scope": "category",
+        "context_id": "dentists",
+        "version": 1,
+        "payload": {"slug": "dentists", "display_name": "Dentists & Oral Care"}
+    })
+    assert r_cat.status_code == 200
+
+    # 2. Push merchant
+    r_m = client.post("/v1/context", json={
+        "scope": "merchant",
+        "context_id": "m_001_drmeera_dentist_delhi",
+        "version": 1,
+        "payload": {
+            "merchant_id": "m_001_drmeera_dentist_delhi",
+            "category_slug": "dentists",
+            "identity": {"name": "Dr. Meera Dental Clinic", "owner_first_name": "Meera", "locality": "Malviya Nagar"}
+        }
+    })
+    assert r_m.status_code == 200
+
+    # 3. Push customer
+    r_c = client.post("/v1/context", json={
+        "scope": "customer",
+        "context_id": "c_001_priya_for_m001",
+        "version": 1,
+        "payload": {
+            "customer_id": "c_001_priya_for_m001",
+            "merchant_id": "m_001_drmeera_dentist_delhi",
+            "identity": {"name": "Priya Sharma"}
+        }
+    })
+    assert r_c.status_code == 200
+
+    # 4. Push trigger
+    r_t = client.post("/v1/context", json={
+        "scope": "trigger",
+        "context_id": "trg_test_recall_001",
+        "version": 1,
+        "payload": {
+            "id": "trg_test_recall_001",
+            "scope": "customer",
+            "kind": "recall_due",
+            "merchant_id": "m_001_drmeera_dentist_delhi",
+            "customer_id": "c_001_priya_for_m001",
+            "payload": {"service_due": "6_month_cleaning"},
+            "suppression_key": "recall_due:priya:smoke_001"
+        }
+    })
+    assert r_t.status_code == 200
+
+    # 5. Check healthz contexts
+    r_h = client.get("/v1/healthz")
+    assert r_h.status_code == 200
+    counts = r_h.json()["contexts_loaded"]
+    assert counts["category"] >= 1
+    assert counts["merchant"] >= 1
+    assert counts["customer"] >= 1
+    assert counts["trigger"] >= 1
+
+    # 6. Call /v1/tick with the pushed trigger
+    r_tick = client.post("/v1/tick", json={
+        "now": "2026-09-27T10:00:00Z",
+        "available_triggers": ["trg_test_recall_001"]
+    })
+    assert r_tick.status_code == 200
+    actions = r_tick.json().get("actions", [])
+    assert len(actions) == 1
+    action = actions[0]
+    assert action["trigger_id"] == "trg_test_recall_001"
+    assert action["merchant_id"] == "m_001_drmeera_dentist_delhi"
+    assert action["customer_id"] == "c_001_priya_for_m001"
+    assert action["send_as"] == "merchant_on_behalf"
+    assert "Priya" in action["body"]
+    assert action["cta"] is not None
+    assert action["suppression_key"] == "recall_due:priya:smoke_001"
+
+    # 7. Subsequent tick within suppression window must return 0 actions
+    r_tick2 = client.post("/v1/tick", json={
+        "now": "2026-09-27T10:05:00Z",
+        "available_triggers": ["trg_test_recall_001"]
+    })
+    assert r_tick2.status_code == 200
+    assert len(r_tick2.json().get("actions", [])) == 0
+
 # ==============================================================================
 # 2. CUSTOMER MULTI-TURN CONVERSATION TESTS
 # ==============================================================================

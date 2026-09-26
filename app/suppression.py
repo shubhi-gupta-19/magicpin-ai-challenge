@@ -15,7 +15,7 @@ def parse_iso(dt_str: Optional[str]) -> Optional[datetime]:
 class SuppressionManager:
     def __init__(self):
         self._lock = threading.RLock()
-        self._suppressed: dict[str, Optional[datetime]] = {}
+        self._suppressed: dict[str, tuple[datetime, Optional[datetime]]] = {}
 
     def is_suppressed(self, key: Optional[str], now_str: Optional[str] = None) -> bool:
         if not key:
@@ -23,10 +23,15 @@ class SuppressionManager:
         with self._lock:
             if key not in self._suppressed:
                 return False
-            expires_at = self._suppressed[key]
+            suppressed_at, expires_at = self._suppressed[key]
+            now_dt = parse_iso(now_str) or datetime.now(timezone.utc)
+            # If current query timestamp is before the action was ever sent, not suppressed
+            if now_dt < suppressed_at:
+                return False
+            # Indefinite suppression
             if expires_at is None:
                 return True
-            now_dt = parse_iso(now_str) or datetime.now(timezone.utc)
+            # Active suppression window
             if now_dt < expires_at:
                 return True
             # Expired, clean up
@@ -42,7 +47,7 @@ class SuppressionManager:
             if expires_at is None or expires_at <= now_dt:
                 from datetime import timedelta
                 expires_at = now_dt + timedelta(days=7)
-            self._suppressed[key] = expires_at
+            self._suppressed[key] = (now_dt, expires_at)
 
     def clear(self):
         with self._lock:
