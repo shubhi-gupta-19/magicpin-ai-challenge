@@ -33,11 +33,15 @@ class SuppressionManager:
             del self._suppressed[key]
             return False
 
-    def suppress(self, key: Optional[str], expires_at_str: Optional[str] = None):
+    def suppress(self, key: Optional[str], expires_at_str: Optional[str] = None, now_str: Optional[str] = None):
         if not key:
             return
         with self._lock:
+            now_dt = parse_iso(now_str) or datetime.now(timezone.utc)
             expires_at = parse_iso(expires_at_str)
+            if expires_at is None or expires_at <= now_dt:
+                from datetime import timedelta
+                expires_at = now_dt + timedelta(days=7)
             self._suppressed[key] = expires_at
 
     def clear(self):

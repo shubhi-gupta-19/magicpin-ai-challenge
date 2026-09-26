@@ -87,13 +87,13 @@ async def tick(body: TickRequest):
     now_str = body.now or datetime.now(timezone.utc).isoformat()
 
     triggers_to_evaluate = []
-    if body.available_triggers:
+    if body.available_triggers is not None and len(body.available_triggers) > 0:
         for tid in body.available_triggers:
             trg = context_store.get("trigger", tid)
             if trg:
-                triggers_to_evaluate.append((tid, trg))
-    else:
-        # Evaluate all stored triggers
+                triggers_to_evaluate.append((trg.get("id", tid), trg))
+    elif body.available_triggers is None:
+        # Evaluate all stored triggers only if available_triggers was omitted entirely
         for trg in context_store.get_all("trigger"):
             tid = trg.get("id")
             if tid:
@@ -154,7 +154,7 @@ async def tick(body: TickRequest):
         actions.append(action)
         seen_merchants.add(mid)
         if supp_key:
-            suppression_manager.suppress(supp_key, trg.get("expires_at"))
+            suppression_manager.suppress(supp_key, trg.get("expires_at"), now_str=now_str)
 
         # Initialize conversation state
         state = conversation_manager.get_or_create(conv_id, mid, cid)
